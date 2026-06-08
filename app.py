@@ -81,12 +81,14 @@ def fetch_dividend_info(symbol: str) -> dict:
         freq_map = {1: "Annuale", 2: "Semestrale", 4: "Trimestrale", 12: "Mensile"}
         freq_str = freq_map.get(freq, "—")
 
-        # Filtra yield anomali — Yahoo Finance a volte restituisce valori errati su titoli europei
+        # Yahoo Finance restituisce yield gia' in percentuale (es. 0.81 = 0.81%)
+        # Valori > 25 sono quasi certamente anomali
         yield_str = "—"
-        if yield_val and 0 < yield_val < 0.25:  # max 25% yield considerato plausibile
-            yield_str = f"{yield_val*100:.1f}%"
-        elif yield_val and yield_val >= 0.25:
-            yield_str = "⚠️ dato anomalo"
+        if yield_val and yield_val > 0:
+            if yield_val <= 25:  # max 25% yield plausibile
+                yield_str = f"{yield_val:.2f}%"
+            else:
+                yield_str = "⚠️ dato anomalo"
 
         return {
             "yield":   yield_str,
@@ -360,7 +362,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("⭐ Watchlist personale")
-    st.caption("Max 20 titoli totali, organizzati per gruppi. Salvata automaticamente.")
+    st.caption("Max 20 titoli per gruppo. Salvata automaticamente.")
 
     watchlist = load_watchlist()
     gruppi = list(watchlist.keys())
@@ -398,8 +400,8 @@ with st.sidebar:
         new_ticker = st.text_input(f"Ticker per '{gruppo_dest_sel}'", key="wl_input").strip().upper()
         submitted = st.form_submit_button("➕ Aggiungi")
         if submitted and new_ticker:
-            if total_tickers(watchlist) >= 20:
-                st.warning("Limite di 20 titoli totali raggiunto.")
+            if len(watchlist.get(gruppo_dest_sel, [])) >= 20:
+                st.warning(f"Limite di 20 titoli per gruppo raggiunto in '{gruppo_dest_sel}'.")
             elif new_ticker in watchlist.get(gruppo_dest_sel, []):
                 st.warning(f"{new_ticker} già presente in '{gruppo_dest_sel}'.")
             else:
@@ -420,7 +422,7 @@ with st.sidebar:
                     save_watchlist(watchlist)
                     st.rerun()
 
-    st.caption(f"Totale: {total_tickers(watchlist)}/20 titoli")
+    st.caption(f"Totale: {total_tickers(watchlist)} titoli · Max 20 per gruppo")
 
     st.markdown("---")
     st.subheader("Ticker aggiuntivi (temporanei)")
@@ -457,153 +459,166 @@ with tabs[0]:
         st.info("La tua watchlist è vuota. Aggiungi titoli e gruppi dalla barra laterale.")
     else:
         gruppi_disponibili = list(wl.keys())
-
-        # Selettore gruppo — vista separata per gruppo
-        col_sel, col_info = st.columns([2, 3])
-        with col_sel:
-            gruppo_vista = st.selectbox(
-                "Visualizza gruppo",
-                gruppi_disponibili,
-                key="gruppo_vista"
-            )
-        with col_info:
-            n_gruppo = len(wl.get(gruppo_vista, []))
-            st.caption(f"**{gruppo_vista}** — {n_gruppo} titoli · Totale watchlist: {tutti_ticker}/20")
-
-        mostra_dividendi = st.toggle("💰 Mostra dati dividendo (solo azioni USA)", value=False)
-
-        ticker_gruppo = wl.get(gruppo_vista, [])
-
-        if not ticker_gruppo:
-            st.info(f"Il gruppo '{gruppo_vista}' è vuoto. Aggiungi titoli dalla barra laterale.")
+        # Filtra gruppi non vuoti per il selettore — evita banner "gruppo vuoto" durante refresh
+        gruppi_con_ticker = [g for g in gruppi_disponibili if wl.get(g)]
+        if not gruppi_con_ticker:
+            st.info("Tutti i gruppi sono vuoti. Aggiungi titoli dalla barra laterale.")
         else:
-            import time
-            wl_rows = []
-            progress_bar = st.progress(0, text=f"Caricamento {gruppo_vista}...")
+            # Mantieni gruppo selezionato tra i refresh
+            if "tab_gruppo_vista" not in st.session_state:
+                st.session_state.tab_gruppo_vista = gruppi_con_ticker[0]
+            if st.session_state.tab_gruppo_vista not in gruppi_con_ticker:
+                st.session_state.tab_gruppo_vista = gruppi_con_ticker[0]
 
-            for i, sym in enumerate(ticker_gruppo):
-                progress_bar.progress((i + 1) / len(ticker_gruppo), text=f"Caricamento {sym}...")
-                df = fetch_ticker(sym, period, interval)
-                if df.empty:
-                    time.sleep(0.3)
-                    df = fetch_ticker(sym, period, interval)
-                s = compute_signals(df)
-                label, _ = score_signal(s)
-                div_info = fetch_dividend_info(sym) if mostra_dividendi else {}
-                wl_rows.append({
-                    "Simbolo":   sym,
-                    "Prezzo":    fmt_price(s.get("price")) if s else "—",
-                    "Var. %":    s.get("daily_chg") if s else None,
-                    "Trend":     s.get("trend", "—") if s else "—",
-                    "RSI(14)":   round(s["rsi"], 1) if s and s.get("rsi") == s.get("rsi") else None,
-                    "Vol×":      round(s.get("vol_ratio", 1), 2) if s else None,
-                    "% da Max":  round(s.get("pct_from_high", 0), 1) if s else None,
-                    "Segnale":   label,
-                    "Div.Yield": div_info.get("yield", "—"),
-                    "Div.Rate":  div_info.get("rate", "—"),
-                    "Frequenza": div_info.get("freq", "—"),
-                })
+            idx_vista = gruppi_con_ticker.index(st.session_state.tab_gruppo_vista)
 
-            progress_bar.empty()
+            col_sel, col_info = st.columns([2, 3])
+            with col_sel:
+                gruppo_vista = st.selectbox(
+                    "Visualizza gruppo",
+                    gruppi_con_ticker,
+                    index=idx_vista,
+                    key="gruppo_vista"
+                )
+                st.session_state.tab_gruppo_vista = gruppo_vista
+            with col_info:
+                n_gruppo = len(wl.get(gruppo_vista, []))
+                st.caption(f"**{gruppo_vista}** — {n_gruppo} titoli · Totale watchlist: {tutti_ticker}/20")
 
-            # Summary gruppo
-            fav  = sum(1 for r in wl_rows if "🟢" in r["Segnale"])
-            neu  = sum(1 for r in wl_rows if "🟡" in r["Segnale"])
-            sfav = sum(1 for r in wl_rows if "🔴" in r["Segnale"])
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Titoli nel gruppo", n_gruppo)
-            mc2.metric("🟢 Favorevoli", fav)
-            mc3.metric("🟡 Neutri", neu)
-            mc4.metric("🔴 Sfavorevoli", sfav)
+            mostra_dividendi = st.toggle("💰 Mostra dati dividendo (solo azioni USA)", value=False)
 
-            st.caption(f"Aggiornamento al {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+            ticker_gruppo = wl.get(gruppo_vista, [])
 
-            # Export Watchlist
-            export_wl = [{
-                "Gruppo":    gruppo_vista,
-                "Simbolo":   r["Simbolo"],
-                "Prezzo":    r["Prezzo"],
-                "Var. %":    f"{r['Var. %']:.2f}" if r.get("Var. %") is not None else "—",
-                "Trend":     r["Trend"],
-                "RSI(14)":   r["RSI(14)"],
-                "Vol×":      r["Vol×"],
-                "% da Max":  r["% da Max"],
-                "Segnale":   r["Segnale"],
-            } for r in wl_rows]
-            from datetime import date
-            wl_filename = f"watchlist_{gruppo_vista}_{date.today().strftime('%Y%m%d')}.xlsx"
-            st.download_button(
-                label="📥 Scarica Watchlist (Excel)",
-                data=df_to_excel_bytes(pd.DataFrame(export_wl)),
-                file_name=wl_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_watchlist"
-            )
-
-            st.markdown("---")
-
-            # Intestazione tabella
-            if mostra_dividendi:
-                hcols = st.columns([1.2, 0.8, 0.8, 1, 0.7, 0.7, 0.8, 0.9, 0.9, 1.2])
-                headers = ["Simbolo", "Prezzo", "Var.%", "Trend", "RSI", "Vol×", "%Max", "Yield", "Rate", "Segnale"]
+            if not ticker_gruppo:
+                st.info(f"Il gruppo '{gruppo_vista}' è vuoto. Aggiungi titoli dalla barra laterale.")
             else:
-                hcols = st.columns([1.5, 1, 1, 1.2, 0.8, 0.8, 1.2, 1.5])
-                headers = ["Simbolo", "Prezzo", "Var. %", "Trend", "RSI", "Vol×", "% da Max", "Segnale"]
+                import time
+                wl_rows = []
+                progress_bar = st.progress(0, text=f"Caricamento {gruppo_vista}...")
 
-            for hc, hl in zip(hcols, headers):
-                hc.markdown(f"**{hl}**")
+                for i, sym in enumerate(ticker_gruppo):
+                    progress_bar.progress((i + 1) / len(ticker_gruppo), text=f"Caricamento {sym}...")
+                    df = fetch_ticker(sym, period, interval)
+                    if df.empty:
+                        time.sleep(0.3)
+                        df = fetch_ticker(sym, period, interval)
+                    s = compute_signals(df)
+                    label, _ = score_signal(s)
+                    div_info = fetch_dividend_info(sym) if mostra_dividendi else {}
+                    wl_rows.append({
+                        "Simbolo":   sym,
+                        "Prezzo":    fmt_price(s.get("price")) if s else "—",
+                        "Var. %":    s.get("daily_chg") if s else None,
+                        "Trend":     s.get("trend", "—") if s else "—",
+                        "RSI(14)":   round(s["rsi"], 1) if s and s.get("rsi") == s.get("rsi") else None,
+                        "Vol×":      round(s.get("vol_ratio", 1), 2) if s else None,
+                        "% da Max":  round(s.get("pct_from_high", 0), 1) if s else None,
+                        "Segnale":   label,
+                        "Div.Yield": div_info.get("yield", "—"),
+                        "Div.Rate":  div_info.get("rate", "—"),
+                        "Frequenza": div_info.get("freq", "—"),
+                    })
 
-            for row in wl_rows:
+                progress_bar.empty()
+
+                # Summary gruppo
+                fav  = sum(1 for r in wl_rows if "🟢" in r["Segnale"])
+                neu  = sum(1 for r in wl_rows if "🟡" in r["Segnale"])
+                sfav = sum(1 for r in wl_rows if "🔴" in r["Segnale"])
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("Titoli nel gruppo", n_gruppo)
+                mc2.metric("🟢 Favorevoli", fav)
+                mc3.metric("🟡 Neutri", neu)
+                mc4.metric("🔴 Sfavorevoli", sfav)
+
+                st.caption(f"Aggiornamento al {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+                # Export Watchlist
+                export_wl = [{
+                    "Gruppo":    gruppo_vista,
+                    "Simbolo":   r["Simbolo"],
+                    "Prezzo":    r["Prezzo"],
+                    "Var. %":    f"{r['Var. %']:.2f}" if r.get("Var. %") is not None else "—",
+                    "Trend":     r["Trend"],
+                    "RSI(14)":   r["RSI(14)"],
+                    "Vol×":      r["Vol×"],
+                    "% da Max":  r["% da Max"],
+                    "Segnale":   r["Segnale"],
+                } for r in wl_rows]
+                from datetime import date
+                wl_filename = f"watchlist_{gruppo_vista}_{date.today().strftime('%Y%m%d')}.xlsx"
+                st.download_button(
+                    label="📥 Scarica Watchlist (Excel)",
+                    data=df_to_excel_bytes(pd.DataFrame(export_wl)),
+                    file_name=wl_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_watchlist"
+                )
+
+                st.markdown("---")
+
+                # Intestazione tabella
                 if mostra_dividendi:
-                    cols = st.columns([1.2, 0.8, 0.8, 1, 0.7, 0.7, 0.8, 0.9, 0.9, 1.2])
+                    hcols = st.columns([1.2, 0.8, 0.8, 1, 0.7, 0.7, 0.8, 0.9, 0.9, 1.2])
+                    headers = ["Simbolo", "Prezzo", "Var.%", "Trend", "RSI", "Vol×", "%Max", "Yield", "Rate", "Segnale"]
                 else:
-                    cols = st.columns([1.5, 1, 1, 1.2, 0.8, 0.8, 1.2, 1.5])
+                    hcols = st.columns([1.5, 1, 1, 1.2, 0.8, 0.8, 1.2, 1.5])
+                    headers = ["Simbolo", "Prezzo", "Var. %", "Trend", "RSI", "Vol×", "% da Max", "Segnale"]
 
-                cols[0].markdown(f"`{row['Simbolo']}`")
-                cols[1].markdown(row["Prezzo"])
+                for hc, hl in zip(hcols, headers):
+                    hc.markdown(f"**{hl}**")
 
-                var = row["Var. %"]
-                try:
-                    v = float(var) if var is not None else float('nan')
-                    if v == v:
-                        arrow = "▲" if v > 0 else "▼" if v < 0 else "—"
-                        color = "green" if v > 0 else "red" if v < 0 else "gray"
-                        cols[2].markdown(f":{color}[{arrow} {abs(v):.2f}%]")
+                for row in wl_rows:
+                    if mostra_dividendi:
+                        cols = st.columns([1.2, 0.8, 0.8, 1, 0.7, 0.7, 0.8, 0.9, 0.9, 1.2])
                     else:
+                        cols = st.columns([1.5, 1, 1, 1.2, 0.8, 0.8, 1.2, 1.5])
+
+                    cols[0].markdown(f"`{row['Simbolo']}`")
+                    cols[1].markdown(row["Prezzo"])
+
+                    var = row["Var. %"]
+                    try:
+                        v = float(var) if var is not None else float('nan')
+                        if v == v:
+                            arrow = "▲" if v > 0 else "▼" if v < 0 else "—"
+                            color = "green" if v > 0 else "red" if v < 0 else "gray"
+                            cols[2].markdown(f":{color}[{arrow} {abs(v):.2f}%]")
+                        else:
+                            cols[2].markdown("—")
+                    except Exception:
                         cols[2].markdown("—")
-                except Exception:
-                    cols[2].markdown("—")
 
-                trend = row["Trend"]
-                t_color = "green" if "↑" in trend else "red" if "↓" in trend else "orange"
-                cols[3].markdown(f":{t_color}[{trend}]")
+                    trend = row["Trend"]
+                    t_color = "green" if "↑" in trend else "red" if "↓" in trend else "orange"
+                    cols[3].markdown(f":{t_color}[{trend}]")
 
-                rsi = row["RSI(14)"]
-                if rsi:
-                    rsi_color = "red" if rsi > 70 else "green" if rsi < 30 else "gray"
-                    cols[4].markdown(f":{rsi_color}[{rsi}]")
-                else:
-                    cols[4].markdown("—")
-
-                vol = row["Vol×"]
-                cols[5].markdown(f"{'🔥' if vol and vol > 2 else ''}{vol if vol else '—'}")
-
-                pfh = row["% da Max"]
-                try:
-                    p = float(pfh) if pfh is not None else float('nan')
-                    if p == p:
-                        cols[6].markdown(f":{'green' if p > -5 else 'orange' if p > -20 else 'red'}[{p:.1f}%]")
+                    rsi = row["RSI(14)"]
+                    if rsi:
+                        rsi_color = "red" if rsi > 70 else "green" if rsi < 30 else "gray"
+                        cols[4].markdown(f":{rsi_color}[{rsi}]")
                     else:
-                        cols[6].markdown("—")
-                except Exception:
-                    cols[6].markdown("—")
+                        cols[4].markdown("—")
 
-                if mostra_dividendi:
-                    cols[7].markdown(row["Div.Yield"])
-                    cols[8].markdown(row["Div.Rate"])
-                    cols[9].markdown(row["Segnale"])
-                else:
-                    cols[7].markdown(row["Segnale"])
+                    vol = row["Vol×"]
+                    cols[5].markdown(f"{'🔥' if vol and vol > 2 else ''}{vol if vol else '—'}")
+
+                    pfh = row["% da Max"]
+                    try:
+                        p = float(pfh) if pfh is not None else float('nan')
+                        if p == p:
+                            cols[6].markdown(f":{'green' if p > -5 else 'orange' if p > -20 else 'red'}[{p:.1f}%]")
+                        else:
+                            cols[6].markdown("—")
+                    except Exception:
+                        cols[6].markdown("—")
+
+                    if mostra_dividendi:
+                        cols[7].markdown(row["Div.Yield"])
+                        cols[8].markdown(row["Div.Rate"])
+                        cols[9].markdown(row["Segnale"])
+                    else:
+                        cols[7].markdown(row["Segnale"])
 
 # TAB 1 — SCANNER
 # ────────────────────────────────────────────────────
@@ -783,15 +798,34 @@ with tabs[2]:
 
         st.markdown("---")
 
-        # Chart: prezzo + MA + volume
+        # Opzioni grafico
+        col_opt1, col_opt2 = st.columns(2)
+        with col_opt1:
+            usa_candele = st.toggle("🕯️ Candele giapponesi", value=True)
+        with col_opt2:
+            mostra_bollinger = st.toggle("📊 Bande di Bollinger", value=True)
+
+        # Chart: candele/linea + MA + Bollinger + volume
+        close = df["Close"]
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                             row_heights=[0.72, 0.28], vertical_spacing=0.04)
 
-        close = df["Close"]
-        fig.add_trace(go.Scatter(
-            x=df.index, y=close,
-            name="Prezzo", line=dict(color="#4a90d9", width=2)
-        ), row=1, col=1)
+        if usa_candele and "Open" in df.columns and "High" in df.columns and "Low" in df.columns:
+            fig.add_trace(go.Candlestick(
+                x=df.index,
+                open=df["Open"], high=df["High"],
+                low=df["Low"],   close=df["Close"],
+                name="Prezzo",
+                increasing_line_color="#2ecc71",
+                decreasing_line_color="#e74c3c",
+                increasing_fillcolor="#2ecc71",
+                decreasing_fillcolor="#e74c3c",
+            ), row=1, col=1)
+        else:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=close,
+                name="Prezzo", line=dict(color="#4a90d9", width=2)
+            ), row=1, col=1)
 
         if len(df) >= 50:
             ma50_line = close.rolling(50).mean()
@@ -807,6 +841,32 @@ with tabs[2]:
                 name="MA 200", line=dict(color="#e74c3c", width=1.5, dash="dash")
             ), row=1, col=1)
 
+        # Bande di Bollinger (20 periodi, 2 deviazioni standard)
+        if mostra_bollinger and len(df) >= 20:
+            bb_period = 20
+            bb_std    = 2
+            bb_ma  = close.rolling(bb_period).mean()
+            bb_std_val = close.rolling(bb_period).std()
+            bb_upper = bb_ma + bb_std * bb_std_val
+            bb_lower = bb_ma - bb_std * bb_std_val
+
+            fig.add_trace(go.Scatter(
+                x=df.index, y=bb_upper,
+                name="BB Superiore", line=dict(color="#8e44ad", width=1, dash="dot"),
+                showlegend=True
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=df.index, y=bb_lower,
+                name="BB Inferiore", line=dict(color="#8e44ad", width=1, dash="dot"),
+                fill="tonexty", fillcolor="rgba(142,68,173,0.06)",
+                showlegend=True
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=df.index, y=bb_ma,
+                name="BB Media", line=dict(color="#8e44ad", width=1),
+                showlegend=True
+            ), row=1, col=1)
+
         colors_vol = ["#2ecc71" if c >= o else "#e74c3c"
                       for c, o in zip(df["Close"], df["Open"])]
         fig.add_trace(go.Bar(
@@ -815,7 +875,7 @@ with tabs[2]:
         ), row=2, col=1)
 
         fig.update_layout(
-            height=520,
+            height=560,
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
@@ -864,6 +924,43 @@ with tabs[2]:
                 st.markdown(f"- Minimo:      `{fmt_price(s.get('low52'))}`")
                 st.markdown(f"- Dist. max:   `{s.get('pct_from_high', 0):.1f}%`")
                 st.markdown(f"- Dist. min:   `{s.get('pct_from_low', 0):.1f}%`")
+
+        # ── NOTIZIE TICKER ────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📰 Ultime notizie")
+        st.caption("Fonte: Yahoo Finance · Le notizie influenzano i movimenti di breve termine.")
+        try:
+            ticker_obj = yf.Ticker(selected_sym)
+            news = ticker_obj.news
+            if news:
+                for item in news[:8]:
+                    content_item = item.get("content", {}) if isinstance(item, dict) else {}
+                    titolo = content_item.get("title", item.get("title", "")) if isinstance(item, dict) else ""
+                    summary = content_item.get("summary", "")
+                    pub_date = content_item.get("pubDate", "")
+                    data_str = ""
+                    if pub_date:
+                        try:
+                            dt = datetime.strptime(pub_date[:10], "%Y-%m-%d")
+                            data_str = dt.strftime("%d/%m/%Y")
+                        except Exception:
+                            data_str = pub_date[:10] if len(pub_date) >= 10 else ""
+                    click_url = content_item.get("clickThroughUrl", {})
+                    url = click_url.get("url", "") if isinstance(click_url, dict) else ""
+                    if titolo:
+                        if url:
+                            st.markdown(f"**[{titolo}]({url})**")
+                        else:
+                            st.markdown(f"**{titolo}**")
+                        if data_str:
+                            st.caption(data_str)
+                        if summary:
+                            st.markdown(f"{summary[:200]}{'...' if len(summary) > 200 else ''}")
+                        st.markdown("")
+            else:
+                st.caption("Nessuna notizia disponibile per questo ticker.")
+        except Exception:
+            st.caption("Notizie non disponibili al momento.")
 
 # ────────────────────────────────────────────────────
 # TAB 3 — FONDAMENTALI
