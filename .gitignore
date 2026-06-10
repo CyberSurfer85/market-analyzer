@@ -1,0 +1,34 @@
+# ── File commerciali (non pubblicare) ─────────────────────────────────────────
+app.py
+avvia.bat
+avvia.sh
+
+# ── Dati personali ─────────────────────────────────────────────────────────────
+watchlist.json
+notes.json
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ── Ambienti virtuali ─────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Sistema operativo ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ── File di test / lavoro ─────────────────────────────────────────────────────
+TEST_DOMANI.md
