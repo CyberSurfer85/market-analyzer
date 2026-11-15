@@ -10,52 +10,35 @@ import requests
 import warnings
 warnings.filterwarnings('ignore')
 
-# ─── WATCHLIST PERSISTENTE ───────────────────────────────────────────────────
-WATCHLIST_FILE = Path(__file__).parent / "watchlist.json"
+# ─── WATCHLIST DEMO (per sessione: nulla viene scritto su file condivisi) ────
+DEFAULT_TICKERS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "SPY", "QQQ", "ENI.MI"]
+MAX_DEMO_TICKERS = 10
 
 def load_watchlist() -> dict:
-    """Carica watchlist a gruppi. Formato: {gruppo: [ticker, ...]}."""
-    try:
-        if WATCHLIST_FILE.exists():
-            data = json.loads(WATCHLIST_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return {"Generale": data}
-            return data
-    except Exception:
-        pass
-    return {"Generale": []}
+    if "watchlist" not in st.session_state:
+        st.session_state["watchlist"] = {"Più popolari": list(DEFAULT_TICKERS)}
+    return st.session_state["watchlist"]
 
 def save_watchlist(wl: dict):
-    try:
-        WATCHLIST_FILE.write_text(json.dumps(wl), encoding="utf-8")
-    except Exception:
-        pass
-
-# File separato per le note
-NOTES_FILE = Path(__file__).parent / "notes.json"
-
-def load_notes() -> dict:
-    """Carica note per ticker. Formato: {ticker: nota}."""
-    try:
-        if NOTES_FILE.exists():
-            return json.loads(NOTES_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-def save_notes(notes: dict):
-    try:
-        NOTES_FILE.write_text(json.dumps(notes, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+    st.session_state["watchlist"] = wl
 
 def total_tickers(wl: dict) -> int:
     return sum(len(v) for v in wl.values())
 
 @st.cache_data(ttl=900)
 def is_usa_ticker(symbol: str) -> bool:
-    """Verifica se il ticker è USA — nessun suffisso di borsa estera."""
-    return '.' not in symbol and '=' not in symbol
+    """Verifica se il ticker è USA — nessun suffisso di borsa estera, no crypto, no forex, no futures."""
+    s = symbol.upper()
+    # Escludi forex (es. EURUSD=X), futures (es. GC=F)
+    if '=' in s:
+        return False
+    # Escludi azioni estere (es. ENI.MI, SAP.DE)
+    if '.' in s:
+        return False
+    # Escludi crypto (es. BTC-USD, ETH-USD) e coppie con trattino
+    if '-' in s:
+        return False
+    return True
 
 def fetch_dividend_info(symbol: str) -> dict:
     """Recupera dati dividendo — solo per titoli USA."""
@@ -207,6 +190,10 @@ UNIVERSE = {
         "JPMorgan":      "JPM",
         "Johnson & J.":  "JNJ",
     },
+    "₿ Crypto": {
+        "Bitcoin":   "BTC-USD",
+        "Ethereum":  "ETH-USD",
+    },
 }
 
 PERIODS = {
@@ -249,8 +236,9 @@ def fetch_info(symbol: str) -> dict:
     except Exception:
         return {}
 
+@st.cache_data(ttl=3600)
 def fetch_fred(series_id: str, limit: int = 60) -> pd.DataFrame:
-    """Scarica serie storiche da FRED — senza cache per massima compatibilità."""
+    """Scarica serie storiche da FRED — cache 1 ora."""
     import io
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -361,75 +349,43 @@ with st.sidebar:
     period, interval = PERIODS[period_label]
 
     st.markdown("---")
-    st.subheader("⭐ Watchlist personale")
-    st.caption("Max 20 titoli per gruppo. Salvata automaticamente.")
+    st.subheader("⭐ Watchlist demo")
+    st.caption("Ticker popolari precaricati. Nella demo la lista vale solo per questa sessione.")
 
     watchlist = load_watchlist()
     gruppi = list(watchlist.keys())
-
-    # Crea / elimina gruppi
-    with st.expander("⚙️ Gestisci gruppi"):
-        with st.form("form_nuovo_gruppo", clear_on_submit=True):
-            nuovo_gruppo = st.text_input("Nuovo gruppo", placeholder="es. Dividendi USA")
-            if st.form_submit_button("➕ Crea gruppo") and nuovo_gruppo.strip():
-                nome = nuovo_gruppo.strip()
-                if nome not in watchlist:
-                    watchlist[nome] = []
-                    save_watchlist(watchlist)
-                    st.rerun()
-        if len(gruppi) > 1:
-            gruppo_da_eliminare = st.selectbox("Elimina gruppo", gruppi, key="del_gruppo")
-            if st.button("🗑️ Elimina gruppo selezionato"):
-                del watchlist[gruppo_da_eliminare]
-                save_watchlist(watchlist)
-                st.rerun()
-
-    # Aggiungi ticker — seleziona gruppo di destinazione + ticker
-    # Mantieni gruppo selezionato tra i rerun
-    # Selettore gruppo persistente — indipendente dal form
-    if "sidebar_gruppo_dest" not in st.session_state:
-        st.session_state.sidebar_gruppo_dest = gruppi[0] if gruppi else "Generale"
-    if st.session_state.sidebar_gruppo_dest not in gruppi:
-        st.session_state.sidebar_gruppo_dest = gruppi[0]
-
-    idx_dest = gruppi.index(st.session_state.sidebar_gruppo_dest)
-    gruppo_dest_sel = st.selectbox("Aggiungi a gruppo", gruppi, index=idx_dest, key="gruppo_dest_outer")
-    st.session_state.sidebar_gruppo_dest = gruppo_dest_sel
-
-    with st.form("wl_form", clear_on_submit=True):
-        new_ticker = st.text_input(f"Ticker per '{gruppo_dest_sel}'", key="wl_input").strip().upper()
-        submitted = st.form_submit_button("➕ Aggiungi")
-        if submitted and new_ticker:
-            if len(watchlist.get(gruppo_dest_sel, [])) >= 20:
-                st.warning(f"Limite di 20 titoli per gruppo raggiunto in '{gruppo_dest_sel}'.")
-            elif new_ticker in watchlist.get(gruppo_dest_sel, []):
-                st.warning(f"{new_ticker} già presente in '{gruppo_dest_sel}'.")
-            else:
-                watchlist[gruppo_dest_sel].append(new_ticker)
-                save_watchlist(watchlist)
-                st.rerun()
-
-    # Riepilogo gruppi con rimozione ticker
     for grp in gruppi:
-        tickers_grp = watchlist.get(grp, [])
-        if tickers_grp:
-            st.markdown(f"**{grp}** ({len(tickers_grp)})")
-            for i, sym in enumerate(tickers_grp):
-                col_sym, col_del = st.columns([4, 1])
-                col_sym.markdown(f"`{sym}`")
-                if col_del.button("✕", key=f"del_{grp}_{i}_{sym}"):
-                    watchlist[grp].pop(i)
-                    save_watchlist(watchlist)
-                    st.rerun()
+        st.markdown(f"**{grp}** ({len(watchlist[grp])})")
+        st.markdown(" ".join(f"`{x}`" for x in watchlist[grp]))
 
-    st.caption(f"Totale: {total_tickers(watchlist)} titoli · Max 20 per gruppo")
+    with st.expander("🔁 Sostituisci con i tuoi ticker"):
+        with st.form("form_sostituisci"):
+            raw = st.text_area(
+                f"Un ticker per riga (max {MAX_DEMO_TICKERS})",
+                value="\n".join(watchlist[gruppi[0]]), height=160)
+            if st.form_submit_button("Sostituisci"):
+                nuovi = []
+                for t in raw.replace(",", "\n").splitlines():
+                    t = t.strip().upper()
+                    if t and t not in nuovi:
+                        nuovi.append(t)
+                if not nuovi:
+                    st.warning("Inserisci almeno un ticker.")
+                else:
+                    if len(nuovi) > MAX_DEMO_TICKERS:
+                        st.warning(f"Demo: usati solo i primi {MAX_DEMO_TICKERS} ticker.")
+                    save_watchlist({"Beta tester": nuovi[:MAX_DEMO_TICKERS]})
+                    st.rerun()
+        if st.button("↩️ Ripristina i popolari"):
+            save_watchlist({"Più popolari": list(DEFAULT_TICKERS)})
+            st.rerun()
 
     st.markdown("---")
     st.subheader("Ticker aggiuntivi (temporanei)")
     custom_raw = st.text_area(
         "Aggiungi ticker (uno per riga, es. TSLA)",
         height=80,
-        help="Non salvati. Per analisi rapide. Usa la Watchlist per titoli fissi."
+        help="Non salvati. Per analisi rapide."
     )
     custom_tickers = [t.strip().upper() for t in custom_raw.splitlines() if t.strip()]
 
@@ -446,7 +402,19 @@ with st.sidebar:
 st.title("📊 Market Analyzer")
 st.caption(f"Analisi al {datetime.now().strftime('%d/%m/%Y %H:%M')} · Periodo: {period_label}")
 
-tabs = st.tabs(["⭐ Watchlist", "📋 Scanner", "📈 Grafico & Dettaglio", "🏛️ Fondamentali", "📝 Note", "ℹ️ Guida"])
+with st.expander("ℹ️ Cosa è questa demo e quali sono i suoi limiti", expanded=False):
+    st.markdown("""
+**Cosa fa:** analisi tecnica e fondamentale per investitori autonomi di medio-lungo periodo — scanner di mercato (USA, Europa, Italia, ETF), grafici a candele con Bollinger, fondamentali e dividendi USA.
+
+**Limiti della demo:**
+- Watchlist precaricata con titoli popolari, sostituibile (max 10 ticker), valida solo per la sessione corrente
+- Nessun salvataggio, nessuna nota personale, nessun export Excel, nessuna sezione Macro
+- Dati Yahoo Finance con ritardo 15–20 min, a solo scopo dimostrativo
+
+*Strumento informativo: non costituisce consulenza né raccomandazione di investimento.*
+""")
+
+tabs = st.tabs(["⭐ Watchlist", "📋 Scanner", "📈 Grafico & Dettaglio", "🏛️ Fondamentali", "ℹ️ Guida"])
 
 # ────────────────────────────────────────────────────
 # TAB 0 — WATCHLIST
@@ -483,7 +451,7 @@ with tabs[0]:
                 st.session_state.tab_gruppo_vista = gruppo_vista
             with col_info:
                 n_gruppo = len(wl.get(gruppo_vista, []))
-                st.caption(f"**{gruppo_vista}** — {n_gruppo} titoli · Totale watchlist: {tutti_ticker}/20")
+                st.caption(f"**{gruppo_vista}** — {n_gruppo} titoli · Totale watchlist: {tutti_ticker} (max 20 per gruppo)")
 
             mostra_dividendi = st.toggle("💰 Mostra dati dividendo (solo azioni USA)", value=False)
 
@@ -545,15 +513,7 @@ with tabs[0]:
                     "% da Max":  r["% da Max"],
                     "Segnale":   r["Segnale"],
                 } for r in wl_rows]
-                from datetime import date
-                wl_filename = f"watchlist_{gruppo_vista}_{date.today().strftime('%Y%m%d')}.xlsx"
-                st.download_button(
-                    label="📥 Scarica Watchlist (Excel)",
-                    data=df_to_excel_bytes(pd.DataFrame(export_wl)),
-                    file_name=wl_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dl_watchlist"
-                )
+                st.caption("📥 Export Excel: non disponibile nella demo.")
 
                 st.markdown("---")
 
@@ -620,6 +580,7 @@ with tabs[0]:
                     else:
                         cols[7].markdown(row["Segnale"])
 
+# ────────────────────────────────────────────────────
 # TAB 1 — SCANNER
 # ────────────────────────────────────────────────────
 with tabs[1]:
@@ -705,14 +666,7 @@ with tabs[1]:
             "Segnale":   r["Segnale"],
         } for r in filtered]
         export_df = pd.DataFrame(export_data)
-        from datetime import date
-        filename = f"scanner_{date.today().strftime('%Y%m%d')}.xlsx"
-        st.download_button(
-            label="📥 Scarica Scanner (Excel)",
-            data=df_to_excel_bytes(export_df),
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        st.caption("📥 Export Excel: non disponibile nella demo.")
 
     st.markdown("---")
 
@@ -1062,86 +1016,25 @@ with tabs[3]:
 
             st.caption("⚠️ Questi dati sono indicativi. Confronta sempre con il settore di riferimento.")
 
-# ────────────────────────────────────────────────────
-# TAB 5 — NOTE
+
+# TAB 6 — GUIDA
 # ────────────────────────────────────────────────────
 with tabs[4]:
-    st.subheader("📝 Note personali sui titoli")
-    st.caption("Annota il motivo di interesse, il prezzo di carico, o qualsiasi considerazione personale. Salvate automaticamente.")
-
-    notes = load_notes()
-
-    # Recupera tutti i ticker dalla watchlist
-    wl_all = load_watchlist()
-    tutti_wl = sorted(set(sym for tickers in wl_all.values() for sym in tickers))
-
-    if not tutti_wl:
-        st.info("Aggiungi titoli alla watchlist per poter annotare note su di essi.")
-    else:
-        # Selettore ticker
-        ticker_note = st.selectbox("Seleziona titolo", tutti_wl, key="note_ticker_sel")
-
-        # Nota esistente
-        nota_attuale = notes.get(ticker_note, "")
-
-        # Editor nota
-        st.markdown(f"**Nota per `{ticker_note}`**")
-        nuova_nota = st.text_area(
-            "Scrivi la tua nota",
-            value=nota_attuale,
-            height=150,
-            placeholder="Es: Prezzo di carico €45.20 — acquistato 15/03/2026. Dividendo trimestrale atteso a giugno. Tenere fino a target €60.",
-            key=f"nota_{ticker_note}"
-        )
-
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button("💾 Salva nota", use_container_width=True):
-                if nuova_nota.strip():
-                    notes[ticker_note] = nuova_nota.strip()
-                else:
-                    notes.pop(ticker_note, None)
-                save_notes(notes)
-                st.success(f"Nota salvata per {ticker_note}")
-        with col2:
-            if nota_attuale and st.button("🗑️ Elimina nota", use_container_width=True):
-                notes.pop(ticker_note, None)
-                save_notes(notes)
-                st.rerun()
-
-        st.markdown("---")
-
-        # Riepilogo tutte le note
-        note_esistenti = {k: v for k, v in notes.items() if k in tutti_wl}
-        if note_esistenti:
-            st.markdown("#### Riepilogo note")
-            for sym, nota in note_esistenti.items():
-                with st.expander(f"`{sym}`"):
-                    st.markdown(nota)
-        else:
-            st.caption("Nessuna nota salvata.")
-
-# TAB 4 — GUIDA
-# ────────────────────────────────────────────────────
-with tabs[5]:
-    st.subheader("Guida — Market Analyzer v17")
+    st.subheader("Guida — Market Analyzer — Demo")
 
     st.markdown("""
 **Logica del sistema**
 
-Market Analyzer aggrega dati da Yahoo Finance (prezzi, fondamentali) e FRED-Federal Reserve
-(dati macro USA) per supportare l'analisi di investimento a medio-lungo termine.
+Market Analyzer aggrega dati da Yahoo Finance (prezzi, fondamentali) per supportare l'analisi di investimento a medio-lungo termine.
 
 Non genera raccomandazioni di acquisto o vendita. Produce segnali tecnici, fondamentali
-e macro per supportare la tua analisi — non per sostituirla.
+per supportare la tua analisi — non per sostituirla.
 
 ---
 
 ### ⭐ Watchlist
-Elenco personale di massimo 20 titoli salvato automaticamente.
-- Aggiungi ticker dal campo in sidebar — funziona con Enter o col pulsante ➕
+Nella demo: ticker popolari precaricati, sostituibili (max 10) dal pannello "Sostituisci con i tuoi ticker" in sidebar.
 - Il campo non è case sensitive: `aapl`, `AAPL`, `Aapl` sono equivalenti
-- Rimuovi titoli con il pulsante ✕ accanto a ciascuno
 - I dati si caricano con barra di avanzamento titolo per titolo
 - **Frequenza consigliata:** una volta al giorno su mercati aperti
 
@@ -1191,31 +1084,18 @@ I ticker della watchlist e personalizzati compaiono **in cima** alla lista.
 
 ---
 
-### 🌐 Macro
-Fonte: Federal Reserve di St. Louis (FRED) — dati ufficiali gratuiti.
-**Frequenza consigliata: una volta a settimana.**
-
-**Curva dei rendimenti (Treasury 2Y vs 10Y)**
-- Spread positivo = curva normale = nessun segnale recessivo
-- Spread negativo = curva invertita = segnale storico di rallentamento (anticipo 12-18 mesi)
-
-**Inflazione CPI (YoY%)**
-- Target Fed: 2%
-- La direzione conta più del numero assoluto
-- In calo verso 2% = apertura a tagli dei tassi = favorevole per azioni
-
-**Dollaro DXY**
-- Forte = pressione su materie prime e multinazionali USA
-- Debole = favorevole per commodity e mercati emergenti
-
-**Lettura integrata:** sintesi automatica dei tre indicatori in un giudizio di contesto.
+### ₿ Crypto (Bitcoin ed Ethereum)
+Inclusi nello Scanner come categoria separata. Grafici, RSI e medie mobili funzionano regolarmente.
+I fondamentali non sono disponibili (P/E, ROE ecc. non si applicano alle crypto).
+Il mercato crypto è aperto 24/7, ma il sistema è pensato per analisi su 5 giorni lavorativi:
+i due giorni di weekend sono irrilevanti per un'ottica medio-lungo termine.
 
 ---
 
 ### Aggiungere ticker personalizzati
 
-Dalla sidebar — campo "Ticker aggiuntivi (temporanei)" per analisi rapide non salvate,
-oppure direttamente in Watchlist per titoli fissi.
+Dalla sidebar — campo "Ticker aggiuntivi (temporanei)" per analisi rapide,
+oppure "Sostituisci con i tuoi ticker" per cambiare la watchlist.
 
 | Tipo | Formato | Esempio |
 |---|---|---|
@@ -1234,7 +1114,7 @@ oppure direttamente in Watchlist per titoli fissi.
 2. Fondamentali aggiornati trimestralmente da Yahoo Finance
 3. Titoli a bassa capitalizzazione possono non essere coperti da Yahoo Finance
 4. Yahoo Finance non concede licenza commerciale — per distribuzione a pagamento valutare Alpha Vantage o Twelve Data
-5. I dati macro FRED coprono principalmente l'economia USA
+5. Demo: nessun salvataggio, note, export Excel o sezione Macro
 
 ---
 
